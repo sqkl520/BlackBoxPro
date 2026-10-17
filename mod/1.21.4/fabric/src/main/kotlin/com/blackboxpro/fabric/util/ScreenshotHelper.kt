@@ -21,7 +21,12 @@ object ScreenshotHelper {
         val filePath: Path,
         val width: Int,
         val height: Int,
-        val fileSize: Long
+        val fileSize: Long,
+        /**
+         * D2：本帧的像素统计（判据见 [TooltipPixelProbe]）。
+         * 带默认值 ⇒ 既有构造点（如其它版本的 provider）无需改动。
+         */
+        val tooltipProbe: TooltipPixelProbe.Stats? = null
     )
 
     /**
@@ -40,13 +45,41 @@ object ScreenshotHelper {
                 val fileSize = Files.size(filePath)
                 val w = image.width
                 val h = image.height
+                // D2：在 close() 之前的持有窗口内取像素统计（判据见 TooltipPixelProbe）。
+                // 与写盘互不影响：writeTo 与像素读取是 NativeImage 上互相独立的方法。
+                val probe = TooltipPixelProbe.countArgb(image.copyPixelsArgb(), w, h)
                 logger.info("Screenshot saved: {} ({}x{}, {} bytes)", filePath, w, h, fileSize)
-                callback.accept(Result.success(ScreenshotResult(filePath, w, h, fileSize)))
+                callback.accept(Result.success(ScreenshotResult(filePath, w, h, fileSize, probe)))
             } finally {
                 image.close()
             }
         } catch (e: Exception) {
             callback.accept(Result.failure(e))
+        }
+    }
+
+    /**
+     * D2（设计 P）：**只统计、不落盘**地读取当前帧缓冲的 tooltip 像素统计。
+     *
+     * 与 [captureAsync] 走同一条 `takeScreenshot` 读取路径，但**不** `writeTo`：
+     * 1. 不多产 PNG（负对照帧不落盘）；
+     * 2. 不影响 [nextIndex] 的编号口径，也不影响按 `NNN_prefix.png` 计数的既有脚本；
+     * 3. 主帧的命名与行为**完全不变**。
+     *
+     * ⚠️ 必须在主线程（渲染线程）调用——`takeScreenshot` 从帧缓冲纹理读回像素。
+     */
+    fun readTooltipStats(): Result<TooltipPixelProbe.Stats> {
+        val framebuffer = MinecraftClient.getInstance().framebuffer
+        return try {
+            val image = ScreenshotRecorder.takeScreenshot(framebuffer)
+            val stats = try {
+                TooltipPixelProbe.countArgb(image.copyPixelsArgb(), image.width, image.height)
+            } finally {
+                image.close()
+            }
+            Result.success(stats)
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 

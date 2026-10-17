@@ -19,6 +19,7 @@ import org.slf4j.LoggerFactory
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -30,6 +31,19 @@ import java.util.concurrent.atomic.AtomicReference
  *    调 `drawTooltip(...)`——绘制发生在真实渲染通道内，会随本帧正常提交进帧缓冲。
  * 3. 另在 `RuntimeTickScheduler.schedule(1)` 的**下一 tick** 读帧缓冲截图。
  * 4. 读帧缓冲前即关闭"继续绘制"开关，避免 tooltip 永久叠在真实画面上。
+ *
+ * D2（设计 P）追加的成对判据：**同一次执行**先拍"同光标、未注入绘制"的负对照帧（只统计、不落盘），
+ * 再打开注入绘制拍主帧；两个计数随**同一个响应**的 `data` 回传，由 plugin 侧 `verify` 断言
+ * **`controlTooltipBgLoose == 0 && tooltipBgLoose >= 300`**
+ * （判据 E2 = `|R−B| ≤ 4 ∧ G ≤ R−8 ∧ R ≤ 40`；阈值的唯一出处是
+ * `RuntimeScreenshotBridge.TOOLTIP_BG_ASSERT_THRESHOLD`）。
+ *
+ * `tooltipBgStrict` / `controlTooltipBgStrict`（判据 A，`G ≤ 6`）**仅作诊断、不参与断言**：
+ * A 抓不到真正的 vanilla tooltip 背景（`[27,12,27]` G=12、`[23,8,23]` G=8），只抓到较暗的一小部分，
+ * 计数随 tooltip 底下的背景变化，在更亮的面板上可掉到 0 而 tooltip 依然正常 ⇒ 用它会**假阴性**。
+ *
+ * 为什么必须成对：`HandledScreen.render` 自身会写 `focusedSlot`
+ * 并可能走 vanilla 的悬停 tooltip 路径，单看"像素 > 0"会被 vanilla 骗过（零回归保护价值）。
  *
  * 为什么不是"回调里立刻截图"：`afterRender` 由 `Screen.renderWithTooltip` 触发，而本帧把几何
  * 真正提交给 GL 的最后一次 `DrawContext.draw()` 在其**之后**（1.21.4 实测字节码偏移 648 → 907），
@@ -84,18 +98,27 @@ class ScreenshotTooltipAction : ActionExecutor {
         val mouseX = hoverState.mouseX.toInt()
         val mouseY = hoverState.mouseY.toInt()
 
-        // drawing：是否继续在渲染回调里画 tooltip（读帧缓冲前一刻置 false）
-        val drawing = AtomicBoolean(true)
-        // drawn：渲染回调是否已画过至少一帧（用于确认"下一 tick 读到的帧含 tooltip"）
+        // drawing：是否允许在渲染回调里**注入**绘制 tooltip（读主帧前一刻置 false）。
+        //   D2 设计 P：刻意以 false 起步——负对照相位必须先拍"同光标、未注入绘制"的一帧。
+        val drawing = AtomicBoolean(false)
+        // drawn：渲染回调是否已注入绘制过至少一帧（**主帧**的门）
         val drawn = AtomicBoolean(false)
+        // rendered：渲染回调是否至少被调用过一次，不论是否绘制（**负对照相位**的门）；
+        //   保证对照帧是 hover 之后真正渲染完成的一整帧，而不是 hover 之前的旧帧
+        val rendered = AtomicBoolean(false)
         // responded：同一 commandId 只发一次响应的守卫（超时分支与截图回调共用同一个 CAS）
         val responded = AtomicBoolean(false)
         // lastDrawError：渲染回调内绘制异常的最后一次原因，供超时文案区分"画不上"与"屏幕关了"
         val lastDrawError = AtomicReference<Throwable?>(null)
+        // 负对照帧的统计量；-1 = 尚未取得（**不得**把"没取到"当成 0，否则会假 PASS）
+        val controlBgStrict = AtomicInteger(-1)
+        val controlBgLoose = AtomicInteger(-1)
 
         // 3. 绘制进真实渲染通道：afterRender 在 Screen.renderWithTooltip 之后触发，回调给的
         //    DrawContext 就是本帧 GameRenderer 自己创建并正在使用的那个（不再手工构造）。
+        //    回调同时充当"本帧已渲染"的探针（rendered，负对照相位的门），与是否绘制无关。
         ScreenEvents.afterRender(screen).register(ScreenEvents.AfterRender { _, drawContext, _, _, _ ->
+            rendered.set(true)
             if (!drawing.get()) return@AfterRender
             try {
                 drawContext.drawTooltip(client.textRenderer, tooltipLines, mouseX, mouseY)
@@ -106,8 +129,10 @@ class ScreenshotTooltipAction : ActionExecutor {
             }
         })
 
-        // 4. 下一 tick 截图：tick 与渲染在主线程互斥；在正常渲染（≥1 帧完成）的前提下，
-        //    读到的才是含 tooltip 的最近一整帧，异常路径由超时分支区分原因后回报
+        // 4. 相位机（设计 P）：CONTROL（同光标、未注入绘制，**只统计不落盘**）
+        //    → 取得负对照后才 drawing=true → MAIN（注入绘制后截图，命名/编号/行为与既有实现一致）。
+        //    tick 与渲染在主线程互斥；在正常渲染（每个相位都等 rendered/drawn 的 ≥1 帧）的前提下，
+        //    读到的才是"已完成渲染并提交"的最近一整帧，异常路径由超时分支区分原因后回报。
         scheduleCapture(
             client = client,
             screen = screen,
@@ -117,8 +142,12 @@ class ScreenshotTooltipAction : ActionExecutor {
             hoverState = hoverState,
             drawing = drawing,
             drawn = drawn,
+            rendered = rendered,
             responded = responded,
             lastDrawError = lastDrawError,
+            controlBgStrict = controlBgStrict,
+            controlBgLoose = controlBgLoose,
+            phase = Phase.CONTROL,
             attempt = 0
         )
 
@@ -126,11 +155,13 @@ class ScreenshotTooltipAction : ActionExecutor {
     }
 
     /**
-     * 排下一次截图尝试，每 tick 检查一次：
-     * - 已画过且仍是同一个屏幕 → 读帧缓冲截图；
-     * - 否则重排，最多 [MAX_RENDER_ATTEMPTS] 次（覆盖"注册后还没渲染过"与"屏幕已关"）；
-     * - 超时则停掉绘制并回 failure，文案按 [lastDrawError] 区分原因；与截图回调共用
-     *   [responded] 守卫，保证只发一次响应。
+     * 排下一次截图尝试，每 tick 检查一次（D2 设计 P 的两个相位）：
+     * - [Phase.CONTROL]：等渲染回调至少跑过一帧（[rendered]，与是否绘制无关）后，**只统计不落盘**地读
+     *   当前帧的 tooltip 像素统计（负对照：同光标、未注入绘制，期望 0）；取得后才打开绘制并转 MAIN。
+     *   读取失败**不伪造成 0**（伪造会变成假 PASS），直接回 failure。
+     * - [Phase.MAIN]：沿用既有逻辑——已注入绘制过至少一帧且仍是同一个屏幕 → 读帧缓冲截图。
+     * 两个相位各自最多重排 [MAX_RENDER_ATTEMPTS] 次；超时则停掉绘制并回 failure，与截图回调共用
+     * [responded] 守卫，保证只发一次响应。MAIN 的超时文案与既有实现逐字一致。
      */
     private fun scheduleCapture(
         client: MinecraftClient,
@@ -141,29 +172,104 @@ class ScreenshotTooltipAction : ActionExecutor {
         hoverState: ContainerTooltipHelper.TooltipState,
         drawing: AtomicBoolean,
         drawn: AtomicBoolean,
+        rendered: AtomicBoolean,
         responded: AtomicBoolean,
         lastDrawError: AtomicReference<Throwable?>,
+        controlBgStrict: AtomicInteger,
+        controlBgLoose: AtomicInteger,
+        phase: Phase,
         attempt: Int
     ) {
         RuntimeTickScheduler.schedule(1) {
             if (responded.get()) return@schedule
 
-            if (drawn.get() && client.currentScreen === screen) {
-                captureScreenshot(commandId, testId, prefix, hoverState, drawing, responded)
+            if (phase == Phase.CONTROL) {
+                // 屏幕已变 ⇒ 对照帧与主帧不可比，直接失败，不要拿不可比的帧下结论
+                if (client.currentScreen !== screen) {
+                    if (responded.compareAndSet(false, true)) {
+                        runCatching {
+                            RuntimeResponseSender.sendResponse(
+                                commandId,
+                                "failure",
+                                "Screen closed or changed before the control frame"
+                            )
+                        }.onFailure { logger.error("response send failed for $commandId", it) }
+                    }
+                    return@schedule
+                }
+
+                if (rendered.get()) {
+                    RuntimeScreenshotBridge.readTooltipStats().fold(
+                        onSuccess = { stats ->
+                            controlBgStrict.set(stats.tooltipBgStrict)
+                            controlBgLoose.set(stats.tooltipBgLoose)
+                            // 负对照已取得：此刻才允许注入绘制，并把主帧相位排到下一 tick
+                            drawing.set(true)
+                            scheduleCapture(
+                                client = client,
+                                screen = screen,
+                                commandId = commandId,
+                                testId = testId,
+                                prefix = prefix,
+                                hoverState = hoverState,
+                                drawing = drawing,
+                                drawn = drawn,
+                                rendered = rendered,
+                                responded = responded,
+                                lastDrawError = lastDrawError,
+                                controlBgStrict = controlBgStrict,
+                                controlBgLoose = controlBgLoose,
+                                phase = Phase.MAIN,
+                                attempt = 0
+                            )
+                        },
+                        onFailure = { error ->
+                            if (responded.compareAndSet(false, true)) {
+                                runCatching {
+                                    RuntimeResponseSender.sendResponse(
+                                        commandId,
+                                        "failure",
+                                        "Control frame probe failed: ${error.message}"
+                                    )
+                                }.onFailure { logger.error("response send failed for $commandId", it) }
+                            }
+                        }
+                    )
+                    return@schedule
+                }
+            } else if (drawn.get() && client.currentScreen === screen) {
+                captureScreenshot(
+                    commandId = commandId,
+                    testId = testId,
+                    prefix = prefix,
+                    hoverState = hoverState,
+                    drawing = drawing,
+                    responded = responded,
+                    controlBgStrict = controlBgStrict,
+                    controlBgLoose = controlBgLoose
+                )
                 return@schedule
             }
 
             if (attempt + 1 >= MAX_RENDER_ATTEMPTS) {
                 drawing.set(false)
-                val reason = lastDrawError.get()?.let {
-                    " (last draw error: ${it.javaClass.simpleName}: ${it.message})"
-                } ?: " (screen closed, or rendering paused)"
+                val what: String
+                val reason: String
+                if (phase == Phase.CONTROL) {
+                    what = "control frame was not rendered"
+                    reason = ""
+                } else {
+                    what = "tooltip was not drawn"
+                    reason = lastDrawError.get()?.let {
+                        " (last draw error: ${it.javaClass.simpleName}: ${it.message})"
+                    } ?: " (screen closed, or rendering paused)"
+                }
                 if (responded.compareAndSet(false, true)) {
                     runCatching {
                         RuntimeResponseSender.sendResponse(
                             commandId,
                             "failure",
-                            "Render timeout after $MAX_RENDER_ATTEMPTS ticks: tooltip was not drawn$reason"
+                            "Render timeout after $MAX_RENDER_ATTEMPTS ticks: $what$reason"
                         )
                     }.onFailure { logger.error("response send failed for $commandId", it) }
                 }
@@ -179,8 +285,12 @@ class ScreenshotTooltipAction : ActionExecutor {
                 hoverState = hoverState,
                 drawing = drawing,
                 drawn = drawn,
+                rendered = rendered,
                 responded = responded,
                 lastDrawError = lastDrawError,
+                controlBgStrict = controlBgStrict,
+                controlBgLoose = controlBgLoose,
+                phase = phase,
                 attempt = attempt + 1
             )
         }
@@ -192,7 +302,9 @@ class ScreenshotTooltipAction : ActionExecutor {
         prefix: String,
         hoverState: ContainerTooltipHelper.TooltipState,
         drawing: AtomicBoolean,
-        responded: AtomicBoolean
+        responded: AtomicBoolean,
+        controlBgStrict: AtomicInteger,
+        controlBgLoose: AtomicInteger
     ) {
         // 已决定读取"当前这一帧"：先关掉绘制，避免后续帧继续叠加 tooltip。
         // 读取本身是同步 takeScreenshot，且渲染与 tick 在主线程互斥，不会读到半帧。
@@ -230,6 +342,16 @@ class ScreenshotTooltipAction : ActionExecutor {
                         addProperty("height", screenshot.height)
                         addProperty("fileSize", screenshot.fileSize)
                         addProperty("index", index)
+                        // ---- D2（设计 P）：成对判据的两个数 + 能力声明 ----
+                        // 断言只用 E2：tooltipBgLoose / controlTooltipBgLoose
+                        //   （|R−B| ≤ 4 ∧ G ≤ R−8 ∧ R ≤ 40；实测阳性 1292~2504、阴性恒 0、阈值 300）
+                        // *Strict 是严格判据 A 的计数，**仅诊断**（对背景敏感、会假阴性），不得参与断言。
+                        addProperty("tooltipPixelProbe", RuntimeScreenshotBridge.PROBE_OK)
+                        addProperty("tooltipBgStrict", screenshot.tooltipBgStrict)
+                        addProperty("tooltipBgLoose", screenshot.tooltipBgLoose)
+                        addProperty("controlTooltipBgStrict", controlBgStrict.get())
+                        addProperty("controlTooltipBgLoose", controlBgLoose.get())
+                        screenshot.tooltipBbox?.let { addProperty("tooltipBbox", it) }
                     }
                     if (responded.compareAndSet(false, true)) {
                         runCatching {
@@ -256,6 +378,9 @@ class ScreenshotTooltipAction : ActionExecutor {
     }
 
     private fun sanitize(name: String): String = name.replace(SANITIZE_PATTERN, "_")
+
+    /** D2 设计 P 的相位：先拍同光标负对照帧，再启用注入绘制拍主帧。 */
+    private enum class Phase { CONTROL, MAIN }
 
     companion object {
         private val logger = LoggerFactory.getLogger("BlackBoxPro-ScreenshotTooltip")
