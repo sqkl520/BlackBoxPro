@@ -288,8 +288,18 @@ d.results.filter(r=>r.status!=='passed'&&r.status!=='skipped').forEach(r=>consol
 
 **`116 = 59 passed / 0 failed / 57 skipped` 的前提，必须说清楚：**
 
-> 只有当 **PR #3 + #4 + #6 同时落地**时才会得到这个结果：#3 提供 1.21.4 端；#4 给上面两个用例补上 `match` 参数（2 failed → 0）；#6 把 `screenshot_tooltip` 登记进 `ActionCatalog`（total 115 → 116，该 action 通过 ⇒ passed 57 → 59）。
-> **该结果目前只在一棵本地未提交的工作树上取得，没有任何单一分支可以直接复现它。** 单看 `dev-2.0`、`feat/1.21.4-fabric` 或 `feat/tooltip-catalog-assert` 中的任何一个，都拿不到 `59/0`。
+> 需要三样东西同时在位：#3 提供 1.21.4 端；#4 给两个用例补上 `match` 参数（2 failed → 0）；#6 把 `screenshot_tooltip` 登记进 `ActionCatalog`（total 115 → 116，该 action 通过 ⇒ passed 57 → 59）。
+>
+> **✅ 已可由单一分支静态复现**：`integrate/1214-catalog`（`c16ca2f`）一条分支即齐备——
+> ```bash
+> git log --oneline integrate/1214-catalog           # c16ca2f → df610f0(match) → 52ea421(1.21.4 端)
+> git show integrate/1214-catalog:common/src/main/kotlin/com/blackboxpro/common/action/ActionCatalog.kt | grep -c 'register("'   # → 116
+> git ls-tree -r --name-only integrate/1214-catalog | grep -c '^mod/1\.21\.4/'                                                  # → 161
+> ```
+> 另需 `BlackBoxTestProfile` 含 `MC_1214`、`BlackBoxTestCatalog` 含 `match` 修复（该分支两者皆有）。
+>
+> ⚠️ 以上是**静态同构**证据（分支内容齐备）；`59/0/57/116` 这个**运行结果**本身仍需在实机上重跑才能确认。
+> 历史上它先在本地未提交工作树上取得，现在该状态已固化为 `integrate/1214-catalog` 分支，可直接检出复现。
 
 **57 项 `skipped` 的来历**（可逐项复算）：`BlackBoxTestCatalog` 的 `pendingFixtureActions` 共 **71** 项；实际 `skipped` 的 57 项**全部**落在这 71 项之内（57/57，无遗漏、无例外），未被跳过的是下列 **14** 项——它们的前置夹具已经就绪：
 
@@ -300,6 +310,11 @@ place_block_at, update_sign, use_item
 ```
 
 ⇒ **71 − 14 = 57**，与 `data.skipped` 实测值吻合。复算方法：读结果 JSON 的 `data.results`（每项 `{action,status,message}`，注意跳过数在 `data.skipped` 是**标量**、明细在 `results`），取其 `status=="skipped"` 的 `action` 集合，与 `pendingFixtureActions` 求差。跳过原因是**夹具缺口**，与客户端能力无关。
+
+> ⚠️ **口径陷阱（两个算式都得 57，但来源不同）**：
+> - 上面这组 `71 / 14` 是 **`dev-2.0` 口径**（`total=115` 的那次跑）。
+> - 而 `59/0/57` 那次的 `total=116`（多了 `screenshot_tooltip`）⇒ 对应的是 **`72 − 15 = 57`**（`pendingFixtureActions` 多一项、就绪项也多一项）。
+> - 两个减法**数值相同纯属巧合**。引用时请连同**树/分支**一起说，别把 71 和 116 混在一句里。
 
 **只有 58/115 项真正执行过，且断言强度有限**：实际执行 = `56 passed + 2 failed` = 58 项；其中 15 项（`screenshot` + 14 个 `query_*`）额外断言"返回的 `data` 非空"，其余 43 项只校验"响应 `status=success`"。因此**不要**把这套计数当作"客户端侧功能全覆盖"的证据。
 
