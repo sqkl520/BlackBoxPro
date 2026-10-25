@@ -28,7 +28,11 @@ It is built for **verifying client-observable behaviour** (what a real client se
 
 ## 它能做什么 / 不能做什么
 
-### 能：客户端侧事实（约 115 个 action）
+### 能：客户端侧事实（action 数量随树而变，**不要记固定值**）
+
+> `ActionCatalog` 在 `dev-2.0` 上是 **115** 项；PR #6 把 `screenshot_tooltip` 纳入后是 **116**。
+> 各端客户端注册表另加客户端专有 action：1.21.11=**116**、1.21.1=**114**、1.12.2=**105**。
+> **想拿运行时真值就读 `POST /status` 的 `actions` 字段**（= 注册表大小），不要信本文的数字。
 
 | 分类 | 示例 |
 |------|------|
@@ -296,6 +300,10 @@ place_block_at, update_sign, use_item
 ⇒ **71 − 14 = 57**，与 `data.skipped` 实测值吻合。复算方法：读结果 JSON 的 `data.results`（每项 `{action,status,message}`，注意跳过数在 `data.skipped` 是**标量**、明细在 `results`），取其 `status=="skipped"` 的 `action` 集合，与 `pendingFixtureActions` 求差。跳过原因是**夹具缺口**，与客户端能力无关。
 
 **只有 58/115 项真正执行过，且断言强度有限**：实际执行 = `56 passed + 2 failed` = 58 项；其中 15 项（`screenshot` + 14 个 `query_*`）额外断言"返回的 `data` 非空"，其余 43 项只校验"响应 `status=success`"。因此**不要**把这套计数当作"客户端侧功能全覆盖"的证据。
+
+> **口径提醒（分子分母必须同源）**：`58/115` 这组数字来自 **`dev-2.0` 口径**（`total=115`）。
+> 在 **PR #6 之上**（`total=116`）实测是 `59 passed / 0 failed / 57 skipped`，即 **`59/116`**。
+> 混用两组会得到"58/116"这种不存在的组合 —— 引用时请连同**树/分支**一起说。
 
 **未验证项**：1.21.1 与 1.12.2 端在本次工作中**没有实机跑过全量 `run_test`**（矩阵中的注册数来自源码静态统计，非运行时验证）；1.21.11/1.21.4 的加载器矩阵中，NeoForge 侧同样没有实机验证记录。
 
