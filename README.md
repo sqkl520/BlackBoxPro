@@ -159,11 +159,13 @@ curl -s -X POST http://127.0.0.1:38080/execute \
 ```
 
 ```powershell
-# PowerShell 等价写法（注意必须显式 UTF-8 落盘）
+# PowerShell 等价写法（注意必须显式 UTF-8 **无 BOM** 落盘）
 $body = @{ id='full'; action='run_test'; params=@{ player='<playerName>'; scope='full' } } | ConvertTo-Json -Depth 5
 $json = (Invoke-WebRequest -Uri http://127.0.0.1:38080/execute -Method POST `
   -ContentType 'application/json' -Body $body -UseBasicParsing).Content
-[System.IO.File]::WriteAllText("$PWD\full.json", $json, [System.Text.Encoding]::UTF8)
+# ⚠️ 必须用 UTF8Encoding($false)。写成 [System.Text.Encoding]::UTF8 会带 BOM(EF BB BF)，
+#    而 node 的 JSON.parse 见 BOM 直接抛 `Unexpected token '﻿'`。
+[System.IO.File]::WriteAllText("$PWD\full.json", $json, (New-Object System.Text.UTF8Encoding($false)))
 ```
 
 **结果必须用 JSON 解析器读**（落盘编码不对会得到坏 JSON）：
