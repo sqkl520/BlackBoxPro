@@ -75,7 +75,7 @@
 
 > ★ **`passed` / `failed` 说的是"框架 action 在本端能否真正生效"，不是"我的插件通过了测试"。**
 > `run_test` 的用例表在 `BlackBoxTestCatalog` 里硬编码为 ActionCatalog 自测，不是可扩展的插件测试套件；
-> 要验自己的插件必须由宿主 Agent 自编排 `/execute` 序列（`chat_command` 开界面 → `query_container_slots` / `screenshot_tooltip` / `query_chat_style` → `close_container`）。详见 `BBP-LOCAL-ONBOARDING.md`。
+> 要验自己的插件必须由宿主 Agent 自编排 `/execute` 序列（`chat_command` 开界面 → `query_container_slots` / `screenshot_tooltip` / `query_chat_style` → `close_container`）。判别方法见下文「结果判定」一节。
 
 ## /status
 
@@ -205,13 +205,13 @@ Invoke-Bbp $ModPort   'close_container'
 Invoke-Bbp $PluginPort 'run_test' @{ player = '<PLAYER>'; scope = 'smoke' }
 ```
 
-> **落盘编码是真实踩过的坑**：Windows PowerShell 5.1 的 `>` / `Out-File` / `Set-Content` 默认用 ANSI(936) 或 UTF-16LE。本机 `testharness/audit/` 下就有 4 个结果文件带 `FF FE` BOM（UTF-16LE），node 按 UTF-8 读会直接 `Unexpected token` 报错。
+> **落盘编码是真实踩过的坑**：Windows PowerShell 5.1 的 `>` / `Out-File` / `Set-Content` 默认用 ANSI(936) 或 UTF-16LE，结果文件开头会出现 `FF FE` BOM，node 按 UTF-8 读会直接 `Unexpected token` 报错。
 > 写结果一律 `[System.IO.File]::WriteAllText($p, $text, (New-Object System.Text.UTF8Encoding($false)))`，并立刻用 node 复验能 `JSON.parse`。
 
 ## 安全提醒
 
 Plugin 的 HTTP 服务是 `HttpServer.create(InetSocketAddress(port), 0)` —— **绑定通配地址（0.0.0.0），默认没有鉴权**，而 `/execute` 里的 `chat_command` 可以发**任意服务端命令**、`stop_server` 可以直接停服。
-⇒ 只在本机隔离测试服上开，只允许 `127.0.0.1` 访问。完整加固清单见 `BBP-LOCAL-ONBOARDING.md` 的「安全与加固」一节。
+⇒ 只在本机隔离测试服上开，只允许 `127.0.0.1` 访问。加固方向（改代码才生效，本文件不代做）：把绑定地址从 `InetSocketAddress(port)` 换成 `InetSocketAddress(InetAddress.getLoopbackAddress(), port)`（`plugin/.../http/BlackBoxHttpServer.kt`、`mod/.../http/ModHttpServer.kt` 各一处），并给 `/execute` 加 token 校验。
 
 ## 端口速查
 
