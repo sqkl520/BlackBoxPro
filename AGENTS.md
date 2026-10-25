@@ -151,7 +151,7 @@ Remove-Item <SERVER_DIR>\plugins\.paper-remapped -Recurse -Force -ErrorAction Si
 | `query_chat_style` | `match` | | 缺了报 `Missing required field: match` |
 | `run_test` | `player` | `scope`（`smoke`\|`full`） | `player` 必须**在线玩家名** |
 
-### 2.1 拓扑
+### 2.2 拓扑
 
 ```
 你的 Agent ──HTTP 38080──> Paper 测试服务端（BlackBoxPro 插件 + 你的被测插件）
@@ -161,7 +161,7 @@ Remove-Item <SERVER_DIR>\plugins\.paper-remapped -Recurse -Force -ErrorAction Si
                            Fabric 客户端（BlackBoxPro Mod，HTTP 38081，硬编码）
 ```
 
-### 2.2 四条硬约束（违反会得到**误导性结果**）
+### 2.3 四条硬约束（违反会得到**误导性结果**）
 
 | 约束 | 违反后果 |
 |---|---|
@@ -170,7 +170,7 @@ Remove-Item <SERVER_DIR>\plugins\.paper-remapped -Recurse -Force -ErrorAction Si
 | **同一时刻只能一个客户端** | 38081 硬编码且 `RuntimeBlackBoxConfig.update()` 在 `dev-2.0` 零调用方 ⇒ 两个客户端互相顶掉 |
 | **收口 HTTP 到回环** | 7 处 `HttpServer.create(InetSocketAddress(port),0)` **默认绑 `0.0.0.0`**、**零鉴权** ⇒ 对局域网敞开 |
 
-### 2.3 调用约定
+### 2.4 调用约定
 
 - 端点：`POST /status`、`POST /execute`。**`/actions` 不存在**（常量未注册，访问得 404）。
 - `run_test` **必传 `params.player`**（在线玩家名，先用客户端 `query_tab_list` 取）；`scope` 只有 `smoke` / `full`。
